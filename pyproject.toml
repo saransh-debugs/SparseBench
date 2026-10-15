@@ -21,3 +21,5 @@ packages = ["sparsebench"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Lets tests import sparsebench without installing it (CPU-only machines).
+pythonpath = ["."]

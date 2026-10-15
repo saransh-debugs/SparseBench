@@ -1,7 +1,5 @@
-"""Block-sparse MoE matmul kernels."""
+"""Block-sparse MoE matmul kernels.
 
-import torch  # noqa: F401  (must load before _C, which links against libtorch)
-
-from sparsebench import _C
-
-__all__ = ["_C"]
+The CUDA extension is not imported here. Import it as `from sparsebench import _C`
+where needed, so the pure-PyTorch modules still work on machines without CUDA.
+"""
