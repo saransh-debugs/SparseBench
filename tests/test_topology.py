@@ -97,5 +97,8 @@ def test_bsr_round_trip(device: str) -> None:
     blocks = torch.randn(topo.nnz_blocks, 4, 4, dtype=torch.float64, device=device)
     dense = bsr_to_dense(blocks, topo)
     assert torch.equal(dense_to_bsr(dense, topo), blocks)
-    # Everything outside the layout is zero: total mass matches the blocks alone.
-    assert torch.equal(dense.abs().sum(), blocks.abs().sum())
+    # Everything outside the layout is zero. (Not checked by comparing sums:
+    # the GPU adds in a different order, so sums differ in the last bits.)
+    inside = bsr_to_dense(torch.ones_like(blocks), topo) != 0
+    assert torch.all(dense[~inside] == 0)
+    assert int(inside.sum()) == blocks.numel()
