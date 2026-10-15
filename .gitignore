@@ -25,3 +25,8 @@ target/
 .DS_Store
 .vscode/
 .idea/
+
+# Profiler output and notebook autosaves
+*.ncu-rep
+*.nsys-rep
+.ipynb_checkpoints/

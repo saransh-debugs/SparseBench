@@ -1,0 +1,23 @@
+[build-system]
+# torch is not listed here on purpose. Install with --no-build-isolation so the
+# extension builds against the torch you already have. An isolated build
+# downloads a second torch (~2 GB) that may not match the one you run with.
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparsebench"
+version = "0.1.0"
+description = "Block-sparse MoE matmul kernels for A100 and H100"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["sparsebench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
