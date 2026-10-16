@@ -11,7 +11,8 @@ Pipelines:
                -> unsort + combine. No host sync.
   stk          MegaBlocks-style: block-sparse layout on the host (sync), padded copy
                of x, stk.ops.sdd -> GELU -> stk.ops.dsd -> combine. Our routing kernels
-               stand in for MegaBlocks' own.
+               stand in for MegaBlocks' own. Index widths chosen per op so stk runs
+               its fastest correct configuration (see stk_pipeline).
   loop         per expert: x[tokens] @ w1[e] -> GELU -> @ w2[e]. Counts on the host (sync).
 
 Each pipeline is checked against the fp32 reference (moe_reference) first and
@@ -93,16 +94,24 @@ def stk_pipeline(x, idx, weight, w1, w2, w1_cat, w2_cat) -> torch.Tensor:
     num_block_cols = num_experts * ffn_dim // 128
     offsets_t = torch.zeros(num_block_cols + 1, dtype=torch.int32, device=x.device)
     offsets_t[1:] = torch.cumsum(torch.bincount(cols, minlength=num_block_cols), 0)
-    idx_t = torch.int32  # not int16: see _setup_stk in sparsebench/baselines.py
+    # Two index widths, each where stk is fastest and still correct:
+    # - SDD needs int32. Its kernel multiplies a block index by 128 in the
+    #   index's own type; with int16 that wraps past column 255 (895 * 128 >
+    #   32767 on Mixtral) and it reads out of bounds. Seen under Triton 3.x.
+    # - DSD is correct with int16 (MegaBlocks' choice) and faster with it,
+    #   so its matrix gets int16 copies of the same layout when they fit.
+    i32, i16_ok = torch.int32, max(topo.num_row_blocks, num_block_cols) < 2**15
+    i_dsd = torch.int16 if i16_ok else torch.int32
+    meta = (row_indices, cols, row_indices[gather])
     layout = stk.Matrix(
         (topo.num_rows, num_experts * ffn_dim),
         torch.empty(topo.nnz_blocks, 128, 128, dtype=x.dtype, device=x.device),
-        row_indices.to(idx_t), cols.to(idx_t), topo.row_offsets.to(torch.int32),
-        row_indices[gather].to(idx_t), offsets_t, gather.to(torch.int32),
+        meta[0].to(i32), meta[1].to(i32), topo.row_offsets.to(torch.int32),
+        meta[2].to(i32), offsets_t, gather.to(torch.int32),
     )  # fmt: skip
     h = stk.ops.sdd(xg, w1_cat, layout)
-    h = stk.Matrix(h.size(), F.gelu(h.data), h.row_indices, h.column_indices, h.offsets,
-                   h.column_indices_t, h.offsets_t, h.block_offsets_t)  # fmt: skip
+    h = stk.Matrix(h.size(), F.gelu(h.data), meta[0].to(i_dsd), meta[1].to(i_dsd), h.offsets,
+                   meta[2].to(i_dsd), h.offsets_t, h.block_offsets_t)  # fmt: skip
     y = stk.ops.dsd(h, w2_cat)
     return combine(y[topo.copy_row.long()], weight)
 
