@@ -22,5 +22,31 @@ uniform routing, block size 128, worst-case buffers (127 row blocks launched,
 Stalls are warps waiting per issued instruction
 (`smsp__average_warps_issue_stalled_*_per_issue_active.ratio`).
 
-v4 numbers (and the new DRAM-bytes, L2-hit-rate and occupancy counters) go
-here after the next run.
+## v3 vs v4 (second run, both shapes)
+
+Same setup. Mixtral-like = D = 4096, F = 14336, E = 8 (71 row blocks
+launched, 69 real). v3 uses 3 stages, v4 uses 2.
+
+| Counter | fine v3 | fine v4 | Mixtral v3 | Mixtral v4 |
+|---|---:|---:|---:|---:|
+| DRAM bytes read | 1.24 GB | 0.66 GB | 6.35 GB | 3.37 GB |
+| DRAM throughput (% of peak) | 78.0 | 52.9 | 48.8 | 27.2 |
+| L2 hit rate (%) | 35.6 | 55.3 | 57.3 | 71.9 |
+| Tensor Core busy (% of peak) | 42.7 | 50.9 | 52.1 | 54.1 |
+| Registers per thread | 122 | 126 | 122 | 126 |
+| Blocks per SM, register limit | 2 | 2 | 2 | 2 |
+| Blocks per SM, shared-memory limit | 2 | 3 | 2 | 3 |
+| Warps active (% of peak) | 23.7 | 23.2 | 24.5 | 24.5 |
+| Stall: long_scoreboard | 1.93 | 0.36 | 0.05 | 0.11 |
+| Stall: barrier | 0.72 | 0.93 | 1.13 | 1.12 |
+| Stall: math_pipe_throttle | 1.33 | 1.33 | 1.40 | 1.36 |
+| Stall: short_scoreboard | 0.87 | 0.83 | 0.73 | 0.85 |
+| Shared-memory load bank conflicts | 9.7k | 3.7k | 17k | 15k |
+
+What it shows:
+- The row-block-first order halves DRAM bytes read on both shapes.
+- Registers cap every version at 2 blocks (16 warps) per SM, which is the
+  ~24% warps active. Shared memory is never the limit, so the stage count
+  doesn't change occupancy. That's why 2 vs 3 stages barely matters.
+- Mixtral v4 uses only 27% of DRAM bandwidth: memory is no longer its limit.
+  What's left is the GEMM inner loop itself (low occupancy, small per-warp tile).
