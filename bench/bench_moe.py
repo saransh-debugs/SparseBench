@@ -13,6 +13,8 @@ Pipelines:
                of x, stk.ops.sdd -> GELU -> stk.ops.dsd -> combine. Our routing kernels
                stand in for MegaBlocks' own. Index widths chosen per op so stk runs
                its fastest correct configuration (see stk_pipeline).
+  scattermoe   ScatterMoE's own MLP module (Triton): grouped GEMMs with the gather and
+               scatter fused, no padding. Its sort uses bincount, which syncs.
   loop         per expert: x[tokens] @ w1[e] -> GELU -> @ w2[e]. Counts on the host (sync).
 
 Each pipeline is checked against the fp32 reference (moe_reference) first and
@@ -116,6 +118,25 @@ def stk_pipeline(x, idx, weight, w1, w2, w1_cat, w2_cat) -> torch.Tensor:
     return combine(y[topo.copy_row.long()], weight)
 
 
+def scattermoe_pipeline(x, idx, weight, mlp) -> torch.Tensor:
+    with torch.no_grad():  # inference: no autograd bookkeeping
+        return mlp(x, weight, idx)
+
+
+def make_scattermoe_mlp(w1: torch.Tensor, w2: torch.Tensor) -> object:
+    """ScatterMoE's own MLP module, holding our weights in its native layout
+    ([E, out, in]). Built once, outside the timer."""
+    from scattermoe.mlp import MLP
+
+    num_experts, d_model, ffn_dim = w1.shape
+    mlp = MLP(input_size=d_model, hidden_size=ffn_dim, num_experts=num_experts, top_k=2,
+              activation=torch.nn.GELU()).to(device=w1.device, dtype=w1.dtype)  # fmt: skip
+    with torch.no_grad():
+        mlp.experts.weight.copy_(w1.transpose(1, 2))
+        mlp.output_experts.weight.copy_(w2.transpose(1, 2))
+    return mlp
+
+
 def loop_pipeline(x, idx, weight, w1, w2) -> torch.Tensor:
     k = idx.shape[1]
     flat = idx.reshape(-1)
@@ -143,6 +164,11 @@ def pipelines(w1: torch.Tensor, w2: torch.Tensor) -> list[tuple[str, bool, Calla
                     lambda *a: stk_pipeline(*a, w1_cat, w2_cat), None))  # fmt: skip
     except ImportError as e:
         out.append(("stk pipeline (MegaBlocks-style)", True, None, f"stk not installed ({e})"))
+    try:
+        mlp = make_scattermoe_mlp(w1, w2)
+        out.append(("ScatterMoE", True, lambda x, idx, weight, *_: scattermoe_pipeline(x, idx, weight, mlp), None))
+    except ImportError as e:
+        out.append(("ScatterMoE", True, None, f"scattermoe not installed ({e})"))
     out.append(("per-expert loop", True, loop_pipeline, None))
     return out
 
@@ -186,6 +212,7 @@ PIPELINE_NAMES = [
     "ours (route + sdd + dsd v5)",
     "torch._grouped_mm pipeline",
     "stk pipeline (MegaBlocks-style)",
+    "ScatterMoE",
     "per-expert loop",
 ]
 
@@ -210,7 +237,7 @@ def benchmark() -> None:
                     rows.append(json.loads(lines[-1][len("RESULT "):]))
                 else:
                     last = (proc.stderr.strip().splitlines() or ["no output"])[-1][:150]
-                    rows.append({"method": name, "host_sync": name not in PIPELINE_NAMES[:2],
+                    rows.append({"method": name, "host_sync": name not in PIPELINE_NAMES[:2],  # first two are sync-free
                                  "skipped": f"crashed (exit {proc.returncode}): {last}"})  # fmt: skip
 
             ours_ms = rows[0].get("ms")

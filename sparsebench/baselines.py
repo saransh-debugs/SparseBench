@@ -222,6 +222,36 @@ def _setup_stk(p: Problem) -> tuple[Run, ToGrouped]:
     return (lambda: stk.ops.dsd(matrix, p.w_cat)), (lambda out: out[p.padded_row])
 
 
+# ---- ScatterMoE: grouped GEMM with no padding, gather/scatter fused ---------
+
+
+def _scattermoe_unavailable() -> str | None:
+    try:
+        import scattermoe  # noqa: F401
+    except ImportError as e:
+        return f"scattermoe not installed ({e})"
+    return None
+
+
+def _setup_scattermoe(p: Problem) -> tuple[Run, ToGrouped]:
+    from scattermoe.parallel_experts import parallel_linear
+
+    # ScatterMoE stores expert weights as [E, out, in] and multiplies by a
+    # transposed view (ParallelExperts.forward). Same here: its native layout.
+    w_view = p.w.transpose(1, 2).contiguous().permute(0, 2, 1)
+    # Rows are already grouped in and out, so its kernel only reads which
+    # expert each row belongs to; the scattered index is never used.
+    sorted_scattered = torch.arange(p.expert_of_row.numel(), device=p.counts.device)
+    offsets = torch.cumsum(p.counts, 0)
+
+    def run() -> torch.Tensor:
+        return parallel_linear(
+            p.h_grouped, w_view, 1, p.expert_of_row, sorted_scattered, offsets, grouped_in=True, grouped_out=True
+        )
+
+    return run, (lambda out: out)
+
+
 # ---- simple ones: per-expert cuBLAS loop, padded bmm ------------------------
 
 
@@ -254,6 +284,7 @@ BASELINES = [
     Baseline("torch._grouped_mm", False, "grouped GEMM, no padding", _setup_torch_grouped_mm, _grouped_mm_unavailable),
     Baseline("grouped_gemm (CUTLASS)", True, "MegaBlocks' grouped GEMM", _setup_grouped_gemm, _grouped_gemm_unavailable),
     Baseline("stk (MegaBlocks Triton DSD)", True, "block-sparse, needs nnz on host", _setup_stk, _stk_unavailable),
+    Baseline("ScatterMoE", True, "no padding; its sort uses bincount (sync)", _setup_scattermoe, _scattermoe_unavailable),
     Baseline("per-expert cuBLAS loop", True, "one torch.mm per expert", _setup_loop),
     Baseline("padded bmm", True, "pad every expert to the busiest", _setup_padded_bmm),
 ]
