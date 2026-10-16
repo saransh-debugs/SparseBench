@@ -18,6 +18,7 @@ setup(
                 "csrc/routing.cu",
                 "csrc/dsd.cpp",
                 "csrc/dsd_v1.cu",
+                "csrc/dsd_v2.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],

@@ -9,7 +9,9 @@ from tests.cases import CASE_NAMES, routing_case
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
 
-VERSIONS = [1]
+# 21 = v2 with a 2-stage pipeline. Only the benchmark uses it, but its
+# shorter ring is the likeliest to have a stage-reuse bug, so test it too.
+VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21)]
 TOL = {"rtol": 1.6e-2, "atol": 1.6e-2}  # bf16 output rounding; layout bugs are far bigger
 
 
@@ -58,6 +60,8 @@ def test_oracle_matches_dense_reference() -> None:
 @pytest.mark.parametrize(("num_experts", "f_blocks"), [(8, 1), (8, 4), (64, 1), (64, 2)], ids=["E8F1", "E8F4", "E64F1", "E64F2"])
 @pytest.mark.parametrize("d_model", [128, 512], ids=["D128", "D512"])
 def test_matches_oracle(version: int, case: str, bs: int, num_experts: int, f_blocks: int, d_model: int) -> None:
+    # bs=64 with F1 gives rows of only 2 K tiles, fewer than v2's 3 stages.
+    # Dead and empty rows (0 tiles) come from the worst-case test below.
     topo, blocks, w = make_inputs(case, 300, num_experts, f_blocks * bs, d_model, bs)
     torch.testing.assert_close(run(blocks, w, topo, version).float(), bsr_matmul_oracle(blocks, w, topo), **TOL)
 
