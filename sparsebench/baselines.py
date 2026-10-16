@@ -204,8 +204,10 @@ def _setup_stk(p: Problem) -> tuple[Run, ToGrouped]:
     column_indices_t = row_indices[gather]
     offsets_t = torch.zeros(num_block_cols + 1, dtype=torch.int32, device=counts.device)
     offsets_t[1:] = torch.cumsum(torch.bincount(column_indices, minlength=num_block_cols), 0)
-    # MegaBlocks stores block indices as int16 when they fit.
-    idx = torch.int16 if max(topo.num_row_blocks, num_block_cols) < 2**15 else torch.int32
+    # int32, not int16: stk's kernels multiply a block index by the block size
+    # (128) in the index's own type. With int16, a column index past 255 wraps
+    # negative (895 * 128 > 32767 on Mixtral) and the kernel reads out of bounds.
+    idx = torch.int32
     matrix = stk.Matrix(
         (topo.num_rows, p.num_experts * p.ffn_dim),
         p.blocks[:nnz],

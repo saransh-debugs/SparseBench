@@ -75,3 +75,24 @@ What it shows:
 - Half the warps per SM (1 fat block instead of 2), as planned.
 - 240 registers per thread, under the 255 limit (spill check: notebook's
   cuobjdump cell).
+
+## SDD (fourth run)
+
+SDD = the first MoE matmul, on the shared v5 inner loop, with the token gather
+and GELU fused. Spill check (`cuobjdump -res-usage`): DSD v5 and SDD both use
+242 registers, STACK 0, LOCAL 0, so no register spills.
+
+| Counter | SDD fine-grained | SDD Mixtral |
+|---|---:|---:|
+| Tensor Core busy (% of peak) | 51.0 | 63.3 |
+| DRAM bytes read | 0.58 GB | 6.69 GB |
+| DRAM throughput (% of peak) | 52.5 | 64.3 |
+| L2 hit rate (%) | 53.2 | 48.6 |
+| Shared-memory load bank conflicts | 0 | 0 |
+| Stall: math_pipe_throttle | 1.09 | 1.47 |
+| Stall: long_scoreboard | 0.55 | 0.33 |
+| Stall: barrier | 0.52 | 0.77 |
+
+Mixtral SDD reads 6.7 GB: each 128-row block streams its expert's whole
+4096 x 14336 W1 slice, and with 1 thread block per SM only a few row blocks of
+the same expert run at once to share it through L2.

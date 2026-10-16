@@ -15,7 +15,8 @@ Pipelines:
   loop         per expert: x[tokens] @ w1[e] -> GELU -> @ w2[e]. Counts on the host (sync).
 
 Each pipeline is checked against the fp32 reference (moe_reference) first and
-only timed if it's right. CUDA events, L2 flushed, median of 20.
+only timed if it's right. CUDA events, L2 flushed, median of 20. Each pipeline
+runs in its own process, so one that crashes can't take the others down.
 
   python bench/bench_moe.py
   python bench/bench_moe.py --profile --shape mixtral   # a few layers, for ncu (bench/ncu.sh sdd)
@@ -24,6 +25,8 @@ only timed if it's right. CUDA events, L2 flushed, median of 20.
 import argparse
 import json
 import pathlib
+import subprocess
+import sys
 from collections.abc import Callable
 
 import torch
@@ -90,7 +93,7 @@ def stk_pipeline(x, idx, weight, w1, w2, w1_cat, w2_cat) -> torch.Tensor:
     num_block_cols = num_experts * ffn_dim // 128
     offsets_t = torch.zeros(num_block_cols + 1, dtype=torch.int32, device=x.device)
     offsets_t[1:] = torch.cumsum(torch.bincount(cols, minlength=num_block_cols), 0)
-    idx_t = torch.int16 if max(topo.num_row_blocks, num_block_cols) < 2**15 else torch.int32
+    idx_t = torch.int32  # not int16: see _setup_stk in sparsebench/baselines.py
     layout = stk.Matrix(
         (topo.num_rows, num_experts * ffn_dim),
         torch.empty(topo.nnz_blocks, 128, 128, dtype=x.dtype, device=x.device),
@@ -135,42 +138,71 @@ def pipelines(w1: torch.Tensor, w2: torch.Tensor) -> list[tuple[str, bool, Calla
     return out
 
 
+def reference_output(x, idx, weight, w1, w2) -> torch.Tensor:
+    """fp32 reference (same math as reference.moe_reference), one expert at a
+    time so fp32 copies of the weights never all exist at once."""
+    ref = torch.zeros(x.shape[0], x.shape[1], device=x.device)
+    for e in range(w1.shape[0]):
+        token, slot = torch.nonzero(idx == e, as_tuple=True)
+        if token.numel():
+            y = F.gelu(x[token].float() @ w1[e].float()) @ w2[e].float()
+            ref.index_add_(0, token, y * weight[token, slot, None].float())
+    return ref
+
+
+def run_one(shape: str, routing: str, name: str) -> dict:
+    """Check, then time, one pipeline on one problem. Runs in its own process."""
+    d_model, ffn_dim, _ = SHAPES[shape]
+    x, idx, weight, w1, w2 = make_layer(shape, routing)
+    ref = reference_output(x, idx, weight, w1, w2)
+    _, sync, fn, reason = next(p for p in pipelines(w1, w2) if p[0] == name)
+    row: dict = {"method": name, "host_sync": sync}
+    if reason is None:
+        try:
+            err = (fn(x, idx, weight, w1, w2).float() - ref).abs().max().item()
+            if err > TOL * (1 + ref.abs().max().item()):
+                reason = f"wrong answer (max error {err:.3g}), not timed"
+            else:
+                ms = time_ms(lambda: fn(x, idx, weight, w1, w2), l2_flush_buffer())
+                flops = 2 * 2 * NUM_TOKENS * 2 * d_model * ffn_dim  # 2 matmuls, k = 2 copies
+                row |= {"ms": round(ms, 3), "tflops": round(flops / ms / 1e9, 1)}
+        except Exception as e:  # noqa: BLE001  report any failure
+            reason = f"failed: {type(e).__name__}: {str(e).splitlines()[0][:150]}"
+    if reason is not None:
+        row["skipped"] = reason
+    return row
+
+
+PIPELINE_NAMES = [
+    "ours (route + sdd + dsd v5)",
+    "torch._grouped_mm pipeline",
+    "stk pipeline (MegaBlocks-style)",
+    "per-expert loop",
+]
+
+
 def benchmark() -> None:
-    flush = l2_flush_buffer()
+    # Each pipeline runs in a fresh process. A baseline that hits an illegal
+    # memory access poisons its CUDA context for good; in one shared process
+    # that would fail every pipeline and shape after it.
     results = []
     print(f"GPU: {torch.cuda.get_device_name()}, torch {torch.__version__}. {NUM_TOKENS} tokens, top-2.")
     print("Whole layer, routing included. 'vs ours' > 1 means slower than ours.\n")
     for shape, (d_model, ffn_dim, num_experts) in SHAPES.items():
         for routing in ROUTINGS:
-            x, idx, weight, w1, w2 = make_layer(shape, routing)
-            # fp32 reference (same math as reference.moe_reference), one expert at
-            # a time so fp32 copies of the weights never all exist at once.
-            ref = torch.zeros(NUM_TOKENS, d_model, device="cuda")
-            for e in range(num_experts):
-                token, slot = torch.nonzero(idx == e, as_tuple=True)
-                if token.numel():
-                    y = F.gelu(x[token].float() @ w1[e].float()) @ w2[e].float()
-                    ref.index_add_(0, token, y * weight[token, slot, None].float())
-            scale = 1 + ref.abs().max().item()
-
             rows = []
-            for name, sync, fn, reason in pipelines(w1, w2):
-                row: dict = {"method": name, "host_sync": sync}
-                if reason is None:
-                    try:
-                        err = (fn(x, idx, weight, w1, w2).float() - ref).abs().max().item()
-                        if err > TOL * scale:
-                            reason = f"wrong answer (max error {err:.3g}), not timed"
-                        else:
-                            ms = time_ms(lambda: fn(x, idx, weight, w1, w2), flush)
-                            flops = 2 * 2 * NUM_TOKENS * 2 * d_model * ffn_dim  # 2 matmuls, k = 2 copies
-                            row |= {"ms": round(ms, 3), "tflops": round(flops / ms / 1e9, 1)}
-                    except Exception as e:  # noqa: BLE001  report any failure, keep going
-                        reason = f"failed: {type(e).__name__}: {str(e).splitlines()[0][:150]}"
-                if reason is not None:
-                    row["skipped"] = reason
-                rows.append(row)
-                torch.cuda.empty_cache()
+            for name in PIPELINE_NAMES:
+                proc = subprocess.run(
+                    [sys.executable, __file__, "--one", shape, routing, name],
+                    capture_output=True, text=True, timeout=1800,
+                )  # fmt: skip
+                lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("RESULT ")]
+                if proc.returncode == 0 and lines:
+                    rows.append(json.loads(lines[-1][len("RESULT "):]))
+                else:
+                    last = (proc.stderr.strip().splitlines() or ["no output"])[-1][:150]
+                    rows.append({"method": name, "host_sync": name not in PIPELINE_NAMES[:2],
+                                 "skipped": f"crashed (exit {proc.returncode}): {last}"})  # fmt: skip
 
             ours_ms = rows[0].get("ms")
             print(f"### {shape}, {routing} routing (D={d_model}, F={ffn_dim}, E={num_experts})\n")
@@ -185,8 +217,6 @@ def benchmark() -> None:
                     print(f"| {r['method']} | - | - | - | {sync} | skipped: {r['skipped']} |")
             print()
             results.append({"shape": shape, "routing": routing, "rows": rows})
-            del x, idx, weight, w1, w2, ref
-            torch.cuda.empty_cache()
 
     out = pathlib.Path(__file__).with_name("results_moe.json")
     payload = {"gpu": torch.cuda.get_device_name(), "torch": torch.__version__, "results": results}
@@ -205,10 +235,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", action="store_true", help="just run a few layers, for ncu")
     parser.add_argument("--shape", choices=list(SHAPES), default="fine_grained")
+    parser.add_argument("--one", nargs=3, metavar=("SHAPE", "ROUTING", "PIPELINE"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("needs a CUDA GPU")
-    if args.profile:
+    if args.one:
+        print("RESULT " + json.dumps(run_one(*args.one)))
+    elif args.profile:
         profile(args.shape)
     else:
         benchmark()
