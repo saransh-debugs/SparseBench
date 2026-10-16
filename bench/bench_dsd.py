@@ -22,13 +22,14 @@ import argparse
 import json
 import math
 import pathlib
-import statistics
 from collections.abc import Callable
 
 import torch
 
 from sparsebench.routing import route_device
 from sparsebench.spmm import dsd
+from sparsebench.timing import l2_flush_buffer
+from sparsebench.timing import time_ms as _time_ms
 from sparsebench.workloads import routing_case
 
 NUM_TOKENS = 4096
@@ -55,22 +56,11 @@ def make_problem(shape: str, routing: str, bs: int = BLOCK_SIZE) -> tuple[object
 
 
 def time_ms(fn: Callable[[], object], flush: torch.Tensor) -> float:
-    for _ in range(WARMUP):
-        fn()
-    samples = []
-    for _ in range(ITERS):
-        flush.zero_()  # evict L2 (40 MB on A100) so every call starts cold
-        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn()
-        end.record()
-        end.synchronize()
-        samples.append(start.elapsed_time(end))
-    return statistics.median(samples)
+    return _time_ms(fn, flush, warmup=WARMUP, iters=ITERS)
 
 
 def benchmark() -> None:
-    flush = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+    flush = l2_flush_buffer()
     rows = []
     for shape, (d_model, ffn_dim, _) in SHAPES.items():
         useful_flops = 2 * NUM_TOKENS * TOP_K * ffn_dim * d_model

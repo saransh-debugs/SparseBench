@@ -15,6 +15,9 @@ dependencies = ["torch>=2.4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+# Optional baselines for bench/bench_baselines.py. Install with --no-deps (they pin
+# their own torch / triton); the Colab notebook does this.
+bench = ["stanford-stk", "grouped_gemm"]
 
 [tool.setuptools]
 packages = ["sparsebench"]
