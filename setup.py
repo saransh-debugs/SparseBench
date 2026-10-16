@@ -21,6 +21,7 @@ setup(
                 "csrc/dsd_v2.cu",
                 "csrc/dsd_v3.cu",
                 "csrc/dsd_v4.cu",
+                "csrc/dsd_v5.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],

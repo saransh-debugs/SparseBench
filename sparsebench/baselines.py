@@ -126,10 +126,10 @@ class Baseline:
 # ---- ours -------------------------------------------------------------------
 
 
-def _setup_ours(p: Problem) -> tuple[Run, ToGrouped]:
+def _setup_ours(p: Problem, version: int) -> tuple[Run, ToGrouped]:
     from sparsebench.spmm import dsd
 
-    return (lambda: dsd(p.blocks, p.w_cat, p.topo, version=4)), (lambda out: out[p.padded_row])
+    return (lambda: dsd(p.blocks, p.w_cat, p.topo, version=version)), (lambda out: out[p.padded_row])
 
 
 # ---- torch._grouped_mm: one call for all experts, no padding ----------------
@@ -246,7 +246,8 @@ def _setup_padded_bmm(p: Problem) -> tuple[Run, ToGrouped]:
 
 
 BASELINES = [
-    Baseline("ours (v4)", False, "block-sparse, worst-case buffers", _setup_ours),
+    Baseline("ours (v5)", False, "block-sparse, worst-case buffers", lambda p: _setup_ours(p, 5)),
+    Baseline("ours (v4)", False, "block-sparse, worst-case buffers", lambda p: _setup_ours(p, 4)),
     Baseline("torch._grouped_mm", False, "grouped GEMM, no padding", _setup_torch_grouped_mm, _grouped_mm_unavailable),
     Baseline("grouped_gemm (CUTLASS)", True, "MegaBlocks' grouped GEMM", _setup_grouped_gemm, _grouped_gemm_unavailable),
     Baseline("stk (MegaBlocks Triton DSD)", True, "block-sparse, needs nnz on host", _setup_stk, _stk_unavailable),

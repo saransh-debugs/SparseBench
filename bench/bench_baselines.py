@@ -71,7 +71,7 @@ def main() -> None:
             p = make_problem(idx, num_experts, ffn_dim, d_model, BLOCK_SIZE)
             ref = reference(p)
             rows = run_one(p, ref, flush)
-            ours_ms = rows[0].get("ms")
+            ours_ms = rows[0].get("ms")  # "vs ours" compares to the newest version (first row)
             print(f"### {shape}, {routing} routing (D={d_model}, F={ffn_dim}, E={num_experts})\n")
             print("| method | ms | TFLOPS | vs ours | host sync | note |")
             print("|---|---:|---:|---:|---|---|")

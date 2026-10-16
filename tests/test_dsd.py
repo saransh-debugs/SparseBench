@@ -11,8 +11,13 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a C
 
 # 21 / 31 = v2 / v3 with a 2-stage pipeline. Only the benchmark uses them,
 # but a shorter ring is the likeliest to have a stage-reuse bug, so test them too.
-VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21, 3, 31, 4, 41)]
+VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21, 3, 31, 4, 41, 5)]
 ZEROS_DEAD_ROWS = {1, 2, 21, 3, 31}  # from v4 on, dead rows are skipped, not zeroed
+
+
+def supports(version: int, bs: int, d_model: int) -> bool:
+    """v5 has bigger tiles: block size 128 and D % 256 only (it rejects the rest)."""
+    return version != 5 or (bs == 128 and d_model % 256 == 0)
 TOL = {"rtol": 1.6e-2, "atol": 1.6e-2}  # bf16 output rounding; layout bugs are far bigger
 
 
@@ -59,10 +64,12 @@ def test_oracle_matches_dense_reference() -> None:
 @pytest.mark.parametrize("case", CASE_NAMES)
 @pytest.mark.parametrize("bs", [64, 128])
 @pytest.mark.parametrize(("num_experts", "f_blocks"), [(8, 1), (8, 4), (64, 1), (64, 2)], ids=["E8F1", "E8F4", "E64F1", "E64F2"])
-@pytest.mark.parametrize("d_model", [128, 512], ids=["D128", "D512"])
+@pytest.mark.parametrize("d_model", [128, 256, 512], ids=["D128", "D256", "D512"])
 def test_matches_oracle(version: int, case: str, bs: int, num_experts: int, f_blocks: int, d_model: int) -> None:
     # bs=64 with F1 gives rows of only 2 K tiles, fewer than v2's 3 stages.
     # Dead and empty rows (0 tiles) come from the worst-case test below.
+    if not supports(version, bs, d_model):
+        pytest.skip(f"v{version} doesn't support bs={bs}, D={d_model}")
     topo, blocks, w = make_inputs(case, 300, num_experts, f_blocks * bs, d_model, bs)
     torch.testing.assert_close(run(blocks, w, topo, version).float(), bsr_matmul_oracle(blocks, w, topo), **TOL)
 
@@ -70,7 +77,9 @@ def test_matches_oracle(version: int, case: str, bs: int, num_experts: int, f_bl
 @pytest.mark.parametrize("version", VERSIONS)
 @pytest.mark.parametrize("bs", [64, 128])
 def test_single_token(version: int, bs: int) -> None:
-    topo, blocks, w = make_inputs("random", 1, 8, 2 * bs, 128, bs)
+    if not supports(version, bs, 256):
+        pytest.skip(f"v{version} doesn't support bs={bs}")
+    topo, blocks, w = make_inputs("random", 1, 8, 2 * bs, 256, bs)
     torch.testing.assert_close(run(blocks, w, topo, version).float(), bsr_matmul_oracle(blocks, w, topo), **TOL)
 
 
@@ -79,6 +88,8 @@ def test_single_token(version: int, bs: int) -> None:
 def test_asymmetric_inputs(version: int, bs: int) -> None:
     # Smooth, structured values with no symmetry between rows and columns
     # (or between H and W), so a transposed or swapped fragment can't hide.
+    if not supports(version, bs, 256):
+        pytest.skip(f"v{version} doesn't support bs={bs}")
     topo, _, _ = make_inputs("random", 200, 8, 2 * bs, 256, bs)
     k_total, d_model = 8 * 2 * bs, 256
     i = torch.arange(k_total, dtype=torch.float32)[:, None]
@@ -144,3 +155,10 @@ def test_rejects_block_shape_mismatch() -> None:
     topo, blocks, w = make_inputs("random", 20, 4, 128, 256, 64)
     with pytest.raises(ValueError, match="blocks must be"):
         run(blocks[:, :32], w, topo, 1)
+
+
+@pytest.mark.parametrize(("bs", "d_model"), [(64, 256), (128, 128), (128, 384)])
+def test_v5_rejects_shapes_it_does_not_support(bs: int, d_model: int) -> None:
+    topo, blocks, w = make_inputs("random", 50, 4, 2 * bs, d_model, bs)
+    with pytest.raises(RuntimeError, match="dsd v5 needs block size 128 and D a multiple of 256"):
+        run(blocks, w, topo, 5)

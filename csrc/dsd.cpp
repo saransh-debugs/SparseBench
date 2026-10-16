@@ -73,6 +73,7 @@ torch::Tensor dsd_cuda(const torch::Tensor& blocks, const torch::Tensor& w, cons
     case 31: dsd_v3_launch(blocks, w, row_offsets, col_indices, out, 2); break;  // benchmark only
     case 4: dsd_v4_launch(blocks, w, row_offsets, col_indices, out, 2); break;
     case 41: dsd_v4_launch(blocks, w, row_offsets, col_indices, out, 3); break;  // benchmark only
+    case 5: dsd_v5_launch(blocks, w, row_offsets, col_indices, out); break;
     default: TORCH_CHECK(false, "unknown dsd version ", version);
   }
   return out;
