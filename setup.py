@@ -12,7 +12,13 @@ setup(
     ext_modules=[
         CUDAExtension(
             name="sparsebench._C",
-            sources=["csrc/bindings.cpp", "csrc/smoke.cu", "csrc/routing.cu"],
+            sources=[
+                "csrc/bindings.cpp",
+                "csrc/smoke.cu",
+                "csrc/routing.cu",
+                "csrc/dsd.cpp",
+                "csrc/dsd_v1.cu",
+            ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
                 # -lineinfo lets ncu map stalls back to source lines.

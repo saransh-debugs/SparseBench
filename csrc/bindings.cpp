@@ -8,4 +8,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("build_topology_cuda", &sparsebench::build_topology_cuda,
         "Routing -> block-sparse layout on the GPU, no host sync", py::arg("expert_idx"),
         py::arg("num_experts"), py::arg("ffn_dim"), py::arg("block_size"));
+  m.def("dsd_cuda", &sparsebench::dsd_cuda, "Block-sparse (BSR) @ dense on Tensor Cores", py::arg("blocks"),
+        py::arg("w"), py::arg("row_offsets"), py::arg("col_indices"), py::arg("version"));
 }
