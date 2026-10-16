@@ -23,7 +23,7 @@ std::vector<torch::Tensor> build_topology_cuda(const torch::Tensor& expert_idx, 
 // out [num_row_blocks*bs, D] = BSR(blocks, row_offsets, col_indices) @ w.
 // blocks [nnz, bs, bs] bf16, w [E*F, D] bf16, bf16 out with fp32 accumulation.
 // version picks the kernel (1 = baseline). Row blocks with no non-zero
-// blocks come out as zeros.
+// blocks come out as zeros in v1-v3, and are left unwritten from v4 on.
 torch::Tensor dsd_cuda(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
                        const torch::Tensor& col_indices, int64_t version);
 

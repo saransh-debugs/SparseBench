@@ -54,6 +54,9 @@ torch::Tensor dsd_cuda(const torch::Tensor& blocks, const torch::Tensor& w, cons
   TORCH_CHECK(blocks.size(0) == col_indices.numel(), "blocks has ", blocks.size(0),
               " blocks but col_indices has ", col_indices.numel());
   TORCH_CHECK(num_row_blocks * bs <= std::numeric_limits<int32_t>::max(), "too many row blocks");
+  // v4 puts every (row block, column slice) tile in a 1-D grid.
+  TORCH_CHECK(num_row_blocks * (d_model / kDsdTileN) <= std::numeric_limits<int32_t>::max(),
+              "too many tiles for a 1-D grid");
   check_aligned(blocks, "blocks");
   check_aligned(w, "w");
 
@@ -68,6 +71,8 @@ torch::Tensor dsd_cuda(const torch::Tensor& blocks, const torch::Tensor& w, cons
     case 21: dsd_v2_launch(blocks, w, row_offsets, col_indices, out, 2); break;
     case 3: dsd_v3_launch(blocks, w, row_offsets, col_indices, out, 3); break;
     case 31: dsd_v3_launch(blocks, w, row_offsets, col_indices, out, 2); break;  // benchmark only
+    case 4: dsd_v4_launch(blocks, w, row_offsets, col_indices, out, 2); break;
+    case 41: dsd_v4_launch(blocks, w, row_offsets, col_indices, out, 3); break;  // benchmark only
     default: TORCH_CHECK(false, "unknown dsd version ", version);
   }
   return out;

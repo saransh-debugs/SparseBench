@@ -12,8 +12,10 @@ def dsd(
     """out = H @ w2_cat, with H block-sparse in topo's layout. Same math as reference.dsd_reference.
 
     blocks [nnz, bs, bs] bf16, w2_cat [E*F, D] bf16 -> [num_row_blocks*bs, D] bf16.
-    With a DeviceTopology, everything is worst-case sized: rows past the real
-    end come out as zeros, and no host sync happens.
+    With a DeviceTopology, everything is worst-case sized and no host sync
+    happens. Rows of empty row blocks (past the real end) come out as zeros in
+    v1-v3. From v4 on they are left unwritten: skipping them is the point, and
+    nothing downstream reads them.
     """
     from sparsebench import _C
 

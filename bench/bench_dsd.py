@@ -10,9 +10,12 @@ Rules (see PLAN.md):
 - CUDA events, L2 flushed before every timed call, median of ITERS.
 - Times come from here, not ncu: ncu locks clocks to base speed.
 
-Writes bench/results_dsd.json and prints a table.
-  python bench/bench_dsd.py                  # benchmark
-  python bench/bench_dsd.py --profile -v 1   # a few launches for ncu (bench/ncu.sh)
+Writes bench/results_dsd.json and prints two tables:
+  1. every kernel version vs cuBLAS
+  2. the newest version at block size 64 vs 128: smaller blocks waste less
+     padding under skewed routing, but each tile does less math
+  python bench/bench_dsd.py                                      # benchmark
+  python bench/bench_dsd.py --profile -v 4 --shape mixtral       # a few launches for ncu (bench/ncu.sh)
 """
 
 import argparse
@@ -36,19 +39,17 @@ SHAPES = {  # name: (D, F, E)
     "fine_grained": (1024, 4096, 64),
 }
 ROUTINGS = ["random", "zipf"]
-VERSIONS = [1, 2, 21, 3, 31]  # 21 / 31 = v2 / v3 with 2 stages instead of 3
+VERSIONS = [1, 2, 3, 4, 41]  # 41 = v4 with 3 stages instead of 2
+BLOCK_SIZE_VERSION = 4
 WARMUP = 3
 ITERS = 20
 
 
-def make_problem(shape: str, routing: str) -> tuple[object, torch.Tensor, torch.Tensor]:
+def make_problem(shape: str, routing: str, bs: int = BLOCK_SIZE) -> tuple[object, torch.Tensor, torch.Tensor]:
     d_model, ffn_dim, num_experts = SHAPES[shape]
     idx = routing_case(routing, NUM_TOKENS, num_experts).cuda()
-    dev = route_device(idx, num_experts, ffn_dim, BLOCK_SIZE)
-    blocks = (
-        torch.randn(dev.col_indices.numel(), BLOCK_SIZE, BLOCK_SIZE, device="cuda", dtype=torch.bfloat16)
-        / math.sqrt(ffn_dim)
-    )
+    dev = route_device(idx, num_experts, ffn_dim, bs)
+    blocks = torch.randn(dev.col_indices.numel(), bs, bs, device="cuda", dtype=torch.bfloat16) / math.sqrt(ffn_dim)
     w = torch.randn(num_experts * ffn_dim, d_model, device="cuda", dtype=torch.bfloat16)
     return dev, blocks, w
 
@@ -104,19 +105,52 @@ def benchmark() -> None:
     print("TFLOPS = useful FLOPs only. Time includes dead row blocks.\n")
     print("| shape | routing | ver | row blocks real / launched | ms | TFLOPS | cuBLAS TFLOPS | % of cuBLAS |")
     print("|---|---|---:|---:|---:|---:|---:|---:|")
-    labels = {21: "v2, 2 stages", 31: "v3, 2 stages"}
+    labels = {41: "v4, 3 stages"}
     for r in rows:
         print(
             f"| {r['shape']} | {r['routing']} | {labels.get(r['version'], 'v' + str(r['version']))} | {r['row_blocks_real']} / {r['row_blocks_launched']}"
             f" | {r['ms']} | {r['tflops']} | {r['cublas_tflops']} | {r['pct_of_cublas']}% |"
         )
+
+    # Block size under skew. Padding rows = real rows the kernel computes but
+    # no token uses: each expert's group is rounded up to a multiple of bs.
+    bs_rows = []
+    useful_rows = NUM_TOKENS * TOP_K
+    for shape, (d_model, ffn_dim, _) in SHAPES.items():
+        useful_flops = 2 * useful_rows * ffn_dim * d_model
+        for routing in ROUTINGS:
+            for bs in (64, 128):
+                dev, blocks, w = make_problem(shape, routing, bs)
+                padded_rows = int(dev.padded_offsets[-1])
+                ms = time_ms(lambda: dsd(blocks, w, dev, version=BLOCK_SIZE_VERSION), flush)
+                bs_rows.append(
+                    {
+                        "shape": shape,
+                        "routing": routing,
+                        "block_size": bs,
+                        "padding_pct": round(100 * (padded_rows - useful_rows) / padded_rows, 1),
+                        "ms": round(ms, 3),
+                        "tflops": round(useful_flops / ms / 1e9, 1),
+                    }
+                )
+                del dev, blocks, w
+
+    print(f"\nBlock size under skew (v{BLOCK_SIZE_VERSION}). Padding = computed rows no token uses.\n")
+    print("| shape | routing | block size | padding | ms | TFLOPS |")
+    print("|---|---|---:|---:|---:|---:|")
+    for r in bs_rows:
+        print(
+            f"| {r['shape']} | {r['routing']} | {r['block_size']} | {r['padding_pct']}% | {r['ms']} | {r['tflops']} |"
+        )
+
     out = pathlib.Path(__file__).with_name("results_dsd.json")
-    out.write_text(json.dumps({"gpu": torch.cuda.get_device_name(), "rows": rows}, indent=2) + "\n")
+    payload = {"gpu": torch.cuda.get_device_name(), "rows": rows, "block_size_rows": bs_rows}
+    out.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def profile(version: int) -> None:
+def profile(version: int, shape: str) -> None:
     # A few launches of one problem. ncu.sh skips the first (cold) one.
-    dev, blocks, w = make_problem("fine_grained", "random")
+    dev, blocks, w = make_problem(shape, "random")
     for _ in range(3):
         dsd(blocks, w, dev, version=version)
     torch.cuda.synchronize()
@@ -126,11 +160,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", action="store_true", help="just run a few launches, for ncu")
     parser.add_argument("-v", "--version", type=int, default=1)
+    parser.add_argument("--shape", choices=list(SHAPES), default="fine_grained")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("needs a CUDA GPU")
     if args.profile:
-        profile(args.version)
+        profile(args.version, args.shape)
     else:
         benchmark()
 

@@ -11,7 +11,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a C
 
 # 21 / 31 = v2 / v3 with a 2-stage pipeline. Only the benchmark uses them,
 # but a shorter ring is the likeliest to have a stage-reuse bug, so test them too.
-VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21, 3, 31)]
+VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21, 3, 31, 4, 41)]
+ZEROS_DEAD_ROWS = {1, 2, 21, 3, 31}  # from v4 on, dead rows are skipped, not zeroed
 TOL = {"rtol": 1.6e-2, "atol": 1.6e-2}  # bf16 output rounding; layout bugs are far bigger
 
 
@@ -105,7 +106,8 @@ def test_worst_case_device_topology(version: int) -> None:
     topo = dev.to_topology()
     assert out.shape == ((dev.row_offsets.numel() - 1) * bs, d_model)
     torch.testing.assert_close(out[: topo.num_rows].float(), bsr_matmul_oracle(blocks, w, topo), **TOL)
-    assert torch.all(out[topo.num_rows :] == 0)
+    if version in ZEROS_DEAD_ROWS:
+        assert torch.all(out[topo.num_rows :] == 0)
 
 
 BAD_INPUTS = {
