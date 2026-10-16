@@ -31,3 +31,26 @@ Mixtral-like: D = 4096, F = 14336, E = 8. Fine-grained: D = 1024, F = 4096, E = 
 - **Padded bmm** is fast only with uniform routing; under Zipf it is 2.4x
   (Mixtral) and 5.7x (fine-grained) slower than ours.
 - Among methods with **no host sync**, ours is the fastest on fine-grained MoE.
+
+## Update: v5 (third run)
+
+Same setup. Times in ms.
+
+| method | host sync | Mixtral uniform | Mixtral Zipf | fine-grained uniform | fine-grained Zipf |
+|---|---|---:|---:|---:|---:|
+| **ours (v5)** | no | 6.44 | 5.53 | 0.637 | 0.684 |
+| ours (v4) | no | 6.98 | 6.53 | 0.703 | 0.763 |
+| torch._grouped_mm | no | 4.13 | 4.12 | 1.206 | 1.284 |
+| grouped_gemm (CUTLASS) | yes | 4.10 | 4.11 | 1.173 | 1.218 |
+| stk (MegaBlocks Triton DSD) | yes | 4.96 | 4.97 | 0.629 | 0.704 |
+| per-expert cuBLAS loop | yes | 4.08 | 4.09 | 1.899 | 1.981 |
+| padded bmm | yes | 3.96 | 9.79 | 0.547 | 4.355 |
+
+- **Fine-grained: v5 ties MegaBlocks' Triton DSD** (1% slower uniform, 3%
+  faster Zipf) without its host sync, and is 1.8-1.9x faster than grouped GEMM.
+- **Mixtral-like: still behind.** 1.1-1.3x behind stk, 1.35-1.55x behind
+  grouped GEMM. With 8 big experts there is nothing sparse to exploit, and
+  tuned dense GEMM tiles win.
+- Run-to-run noise: the same v5 Mixtral-uniform case measured 5.67 ms in
+  bench_dsd.py and 6.44 ms here. Differences under ~10% between scripts are
+  not meaningful; compare rows within one table.

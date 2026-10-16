@@ -50,3 +50,28 @@ What it shows:
   doesn't change occupancy. That's why 2 vs 3 stages barely matters.
 - Mixtral v4 uses only 27% of DRAM bandwidth: memory is no longer its limit.
   What's left is the GEMM inner loop itself (low occupancy, small per-warp tile).
+
+## v4 vs v5 (third run, both shapes)
+
+v5: 128 x 256 thread-block tile, K step 64, 64 x 64 warp tiles, 3 stages in
+144 KB dynamic shared memory.
+
+| Counter | fine v4 | fine v5 | Mixtral v4 | Mixtral v5 |
+|---|---:|---:|---:|---:|
+| Tensor Core busy (% of peak) | 50.8 | 62.0 | 54.1 | 65.5 |
+| DRAM bytes read | 0.66 GB | 0.65 GB | 3.37 GB | 2.37 GB |
+| L2 hit rate (%) | 55.6 | 47.9 | 71.9 | 72.9 |
+| Registers per thread | 126 | 240 | 126 | 240 |
+| Blocks per SM (registers / shared memory) | 2 / 3 | 1 / 1 | 2 / 3 | 1 / 1 |
+| Warps active (% of peak) | 23.2 | 12.4 | 24.5 | 12.5 |
+| Shared-memory load bank conflicts | 3.4k | 0 | 16.5k | 0 |
+| Stall: math_pipe_throttle | 1.33 | 1.84 | 1.36 | 1.86 |
+| Stall: barrier | 0.93 | 0.81 | 1.12 | 0.83 |
+| Stall: short_scoreboard | 0.83 | 0.20 | 0.85 | 0.20 |
+
+What it shows:
+- Tensor Cores go from about half busy to about two-thirds busy. The top stall
+  is now math_pipe_throttle: warps waiting because the Tensor Cores are busy.
+- Half the warps per SM (1 fat block instead of 2), as planned.
+- 240 registers per thread, under the 255 limit (spill check: notebook's
+  cuobjdump cell).
