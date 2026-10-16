@@ -61,4 +61,31 @@ __device__ __forceinline__ void cp_async_wait() {
   asm volatile("cp.async.wait_group %0;\n" ::"n"(N) : "memory");
 }
 
+// ---- ldmatrix: four 8x8 bf16 tiles from shared memory, in mma fragment layout ----
+//
+// Lanes 8j .. 8j+7 each give the address of one 16-byte row of tile j.
+// Tile j lands in r[j]. Without .trans, lane L gets row L/4, columns
+// 2(L%4) and 2(L%4)+1 of each tile: exactly an mma A register.
+// With .trans, lane L gets column L/4, rows 2(L%4) and 2(L%4)+1: two
+// consecutive k values for one n, exactly an mma B register, read from a
+// row-major (k-major) tile.
+//
+// One ldmatrix replaces 4 (A) or 8 (B, 16-bit) separate shared loads, and
+// each 8-address phase is one shared-memory transaction if the 8 rows sit in
+// different banks (that's what the swizzle in dsd_v3.cu arranges).
+
+__device__ __forceinline__ void ldmatrix_x4(uint32_t (&r)[4], const void* smem_row) {
+  const auto addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_row));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+               : "r"(addr));
+}
+
+__device__ __forceinline__ void ldmatrix_x4_trans(uint32_t (&r)[4], const void* smem_row) {
+  const auto addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_row));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+               : "r"(addr));
+}
+
 }  // namespace sparsebench

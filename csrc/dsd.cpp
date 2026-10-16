@@ -66,6 +66,8 @@ torch::Tensor dsd_cuda(const torch::Tensor& blocks, const torch::Tensor& w, cons
     case 2: dsd_v2_launch(blocks, w, row_offsets, col_indices, out, 3); break;
     // Not a real version: v2 with 2 stages, so the benchmark can show why v2 uses 3.
     case 21: dsd_v2_launch(blocks, w, row_offsets, col_indices, out, 2); break;
+    case 3: dsd_v3_launch(blocks, w, row_offsets, col_indices, out, 3); break;
+    case 31: dsd_v3_launch(blocks, w, row_offsets, col_indices, out, 2); break;  // benchmark only
     default: TORCH_CHECK(false, "unknown dsd version ", version);
   }
   return out;

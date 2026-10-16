@@ -1,0 +1,206 @@
+// DSD v3: v2 + no shared-memory bank conflicts (XOR swizzle + ldmatrix).
+//
+// ncu on v2: top stall mio_throttle (the shared-memory queue is full),
+// caused by 145M bank conflicts on fragment loads. Changed from v2: only
+// where each 16-byte chunk sits in shared memory, and how fragments are read
+// (ldmatrix instead of single loads). Pipeline, tiles and epilogue are v2's.
+//
+// Bank model: shared memory serves 128 bytes per transaction, as 8 slots of
+// 16 bytes. An ldmatrix phase asks for 8 rows of 16 bytes. If two of them
+// fall in the same slot (different addresses), they're served one after another.
+//
+// A tile [BS][32] bf16: a row is 64 bytes = 4 chunks, slot = (4*row + chunk) % 8.
+//   8 consecutive rows, same chunk -> slots c, c+4, c, c+4, ...: 4-way conflict.
+//   Stored chunk = chunk ^ ((row >> 1) & 3) -> slot = 4*(row & 1) + (chunk ^ (row>>1 & 3)),
+//   which takes 8 different values over 8 consecutive rows. 0 conflicts.
+// B tile [32][128] bf16: a row is 256 bytes = 16 chunks, slot = chunk % 8.
+//   8 consecutive k-rows, same chunk -> same slot 8 times: 8-way conflict.
+//   Stored chunk = chunk ^ (row & 7) -> slot = (chunk ^ row) % 8: 8 different slots.
+//
+// Why XOR and not padding each row: padding costs shared memory, and 3 stages
+// already fill the 48 KB static limit. XOR costs no memory, one instruction.
+
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+
+#include <cstdint>
+
+#include "dsd.hpp"
+#include "mma.cuh"
+
+namespace sparsebench {
+namespace {
+
+constexpr int kTileN = kDsdTileN;
+constexpr int kTileK = 32;
+constexpr int kThreads = 256;  // 8 warps
+constexpr int kWarpsM = 2;
+constexpr int kWarpsN = 4;
+constexpr int kWarpN = kTileN / kWarpsN;
+constexpr int kMmaN = kWarpN / 8;
+constexpr int kStaticSmemLimit = 48 * 1024;
+constexpr int kChunk = 8;  // bf16 per 16-byte chunk
+
+// Element offset of 16-byte chunk `chunk` of row `row`, after the swizzle.
+__device__ __forceinline__ int a_offset(int row, int chunk) {
+  return row * kTileK + ((chunk ^ ((row >> 1) & 3)) * kChunk);
+}
+__device__ __forceinline__ int b_offset(int row, int chunk) {
+  return row * kTileN + ((chunk ^ (row & 7)) * kChunk);
+}
+
+template <int BS, int STAGES>
+__global__ void __launch_bounds__(kThreads) dsd_v3_kernel(const __nv_bfloat16* __restrict__ blocks,
+                                                          const __nv_bfloat16* __restrict__ w,
+                                                          const int32_t* __restrict__ row_offsets,
+                                                          const int32_t* __restrict__ col_indices,
+                                                          __nv_bfloat16* __restrict__ out, int32_t d_model) {
+  constexpr int kWarpM = BS / kWarpsM;
+  constexpr int kMmaM = kWarpM / 16;
+  constexpr int kTilesPerBlock = BS / kTileK;
+  static_assert(BS % kTileK == 0 && kWarpM % 16 == 0, "unsupported block size");
+  static_assert(kMmaN % 2 == 0, "B fragments are loaded two mma tiles at a time");
+  static_assert(STAGES >= 2, "need at least 2 stages to overlap anything");
+  static_assert(STAGES * (BS * kTileK + kTileK * kTileN) * sizeof(__nv_bfloat16) <= kStaticSmemLimit,
+                "stages don't fit in static shared memory");
+
+  // 128-byte aligned so "slot = address / 16 % 8" holds from the first row.
+  __shared__ __align__(128) __nv_bfloat16 a_smem[STAGES][BS * kTileK];
+  __shared__ __align__(128) __nv_bfloat16 b_smem[STAGES][kTileK * kTileN];
+
+  const int row_block = blockIdx.x;
+  const int n0 = blockIdx.y * kTileN;
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  const int warp_m = warp / kWarpsN;
+  const int warp_n = warp % kWarpsN;
+  const int g = lane >> 2;
+  const int t = lane & 3;
+
+  const int32_t begin = row_offsets[row_block];
+  const int32_t end = row_offsets[row_block + 1];
+  const int32_t num_tiles = (end - begin) * kTilesPerBlock;
+
+  // Same copies as v2; each chunk goes to its swizzled slot.
+  auto load_tile = [&](int32_t tile, int stage) {
+    const int32_t p = begin + tile / kTilesPerBlock;
+    const int k0 = (tile % kTilesPerBlock) * kTileK;
+    const __nv_bfloat16* a_block = blocks + static_cast<int64_t>(p) * BS * BS;
+    const __nv_bfloat16* w_rows = w + static_cast<int64_t>(col_indices[p]) * BS * d_model + n0;
+    for (int i = tid; i < BS * kTileK / kChunk; i += kThreads) {
+      const int r = i / (kTileK / kChunk);
+      const int c = i % (kTileK / kChunk);
+      cp_async_16(&a_smem[stage][a_offset(r, c)], a_block + static_cast<int64_t>(r) * BS + k0 + c * kChunk);
+    }
+    for (int i = tid; i < kTileK * kTileN / kChunk; i += kThreads) {
+      const int r = i / (kTileN / kChunk);
+      const int c = i % (kTileN / kChunk);
+      cp_async_16(&b_smem[stage][b_offset(r, c)], w_rows + static_cast<int64_t>(k0 + r) * d_model + c * kChunk);
+    }
+  };
+
+  // Which row each lane points ldmatrix at. Fixed for the whole kernel.
+  //   A (x4): tiles = rows 0-7 / 8-15 of the 16-row mma tile, at k 0-7 / 8-15.
+  //           Lane L: row L % 16, k chunk L / 16.
+  //   B (x4.trans): tiles = k 0-7 / 8-15, for n 0-7 / 8-15 (two mma tiles).
+  //           Lane L: k row (L % 8) + 8 * ((L / 8) % 2), n chunk L / 16.
+  const int a_lane_row = lane & 15;
+  const int a_lane_chunk = lane >> 4;
+  const int b_lane_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+  const int b_lane_chunk = lane >> 4;
+
+  float acc[kMmaM][kMmaN][4] = {};
+
+  // Prologue and main loop: identical to v2 (see the comments there).
+#pragma unroll
+  for (int s = 0; s < STAGES - 1; ++s) {
+    if (s < num_tiles) load_tile(s, s);
+    cp_async_commit();
+  }
+
+  for (int32_t i = 0; i < num_tiles; ++i) {
+    cp_async_wait<STAGES - 2>();
+    __syncthreads();
+
+    const int32_t next = i + STAGES - 1;
+    if (next < num_tiles) load_tile(next, next % STAGES);
+    cp_async_commit();
+
+    const __nv_bfloat16* a_stage = a_smem[i % STAGES];
+    const __nv_bfloat16* b_stage = b_smem[i % STAGES];
+#pragma unroll
+    for (int kk = 0; kk < kTileK; kk += 16) {
+      uint32_t a_frag[kMmaM][4];
+      uint32_t b_frag[kMmaN][2];
+#pragma unroll
+      for (int mi = 0; mi < kMmaM; ++mi) {
+        const int row = warp_m * kWarpM + mi * 16 + a_lane_row;
+        ldmatrix_x4(a_frag[mi], a_stage + a_offset(row, kk / kChunk + a_lane_chunk));
+      }
+#pragma unroll
+      for (int nj = 0; nj < kMmaN / 2; ++nj) {
+        const int chunk = (warp_n * kWarpN + nj * 16) / kChunk + b_lane_chunk;
+        uint32_t r[4];
+        ldmatrix_x4_trans(r, b_stage + b_offset(kk + b_lane_row, chunk));
+        b_frag[2 * nj][0] = r[0];      // k 0-7,  n 0-7
+        b_frag[2 * nj][1] = r[1];      // k 8-15, n 0-7
+        b_frag[2 * nj + 1][0] = r[2];  // k 0-7,  n 8-15
+        b_frag[2 * nj + 1][1] = r[3];  // k 8-15, n 8-15
+      }
+#pragma unroll
+      for (int mi = 0; mi < kMmaM; ++mi)
+#pragma unroll
+        for (int ni = 0; ni < kMmaN; ++ni) mma_bf16_16816(acc[mi][ni], a_frag[mi], b_frag[ni]);
+    }
+  }
+  cp_async_wait<0>();
+
+#pragma unroll
+  for (int mi = 0; mi < kMmaM; ++mi) {
+#pragma unroll
+    for (int ni = 0; ni < kMmaN; ++ni) {
+      const int64_t r = static_cast<int64_t>(row_block) * BS + warp_m * kWarpM + mi * 16 + g;
+      const int c = n0 + warp_n * kWarpN + ni * 8 + 2 * t;
+      *reinterpret_cast<__nv_bfloat162*>(out + r * d_model + c) =
+          __floats2bfloat162_rn(acc[mi][ni][0], acc[mi][ni][1]);
+      *reinterpret_cast<__nv_bfloat162*>(out + (r + 8) * d_model + c) =
+          __floats2bfloat162_rn(acc[mi][ni][2], acc[mi][ni][3]);
+    }
+  }
+}
+
+template <int BS, int STAGES>
+void launch(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
+            const torch::Tensor& col_indices, torch::Tensor& out) {
+  const auto d_model = static_cast<int32_t>(w.size(1));
+  const dim3 grid(static_cast<unsigned>(row_offsets.numel() - 1), static_cast<unsigned>(d_model / kTileN));
+  dsd_v3_kernel<BS, STAGES><<<grid, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<const __nv_bfloat16*>(blocks.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16*>(w.data_ptr<at::BFloat16>()), row_offsets.data_ptr<int32_t>(),
+      col_indices.data_ptr<int32_t>(), reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), d_model);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <int STAGES>
+void launch_bs(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
+               const torch::Tensor& col_indices, torch::Tensor& out) {
+  switch (blocks.size(1)) {
+    case 64: launch<64, STAGES>(blocks, w, row_offsets, col_indices, out); break;
+    case 128: launch<128, STAGES>(blocks, w, row_offsets, col_indices, out); break;
+    default: TORCH_CHECK(false, "dsd v3: unsupported block size ", blocks.size(1));
+  }
+}
+
+}  // namespace
+
+void dsd_v3_launch(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
+                   const torch::Tensor& col_indices, torch::Tensor& out, int stages) {
+  switch (stages) {
+    case 2: launch_bs<2>(blocks, w, row_offsets, col_indices, out); break;
+    case 3: launch_bs<3>(blocks, w, row_offsets, col_indices, out); break;
+    default: TORCH_CHECK(false, "dsd v3: unsupported stage count ", stages);
+  }
+}
+
+}  // namespace sparsebench

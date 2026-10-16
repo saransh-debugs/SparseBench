@@ -15,4 +15,7 @@ void dsd_v1_launch(const torch::Tensor& blocks, const torch::Tensor& w, const to
 void dsd_v2_launch(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
                    const torch::Tensor& col_indices, torch::Tensor& out, int stages);
 
+void dsd_v3_launch(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
+                   const torch::Tensor& col_indices, torch::Tensor& out, int stages);
+
 }  // namespace sparsebench

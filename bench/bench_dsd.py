@@ -36,7 +36,7 @@ SHAPES = {  # name: (D, F, E)
     "fine_grained": (1024, 4096, 64),
 }
 ROUTINGS = ["random", "zipf"]
-VERSIONS = [1, 2, 21]  # 21 = v2 with 2 stages instead of 3
+VERSIONS = [1, 2, 21, 3, 31]  # 21 / 31 = v2 / v3 with 2 stages instead of 3
 WARMUP = 3
 ITERS = 20
 
@@ -104,7 +104,7 @@ def benchmark() -> None:
     print("TFLOPS = useful FLOPs only. Time includes dead row blocks.\n")
     print("| shape | routing | ver | row blocks real / launched | ms | TFLOPS | cuBLAS TFLOPS | % of cuBLAS |")
     print("|---|---|---:|---:|---:|---:|---:|---:|")
-    labels = {21: "v2, 2 stages"}
+    labels = {21: "v2, 2 stages", 31: "v3, 2 stages"}
     for r in rows:
         print(
             f"| {r['shape']} | {r['routing']} | {labels.get(r['version'], 'v' + str(r['version']))} | {r['row_blocks_real']} / {r['row_blocks_launched']}"

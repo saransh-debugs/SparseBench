@@ -4,7 +4,7 @@
 # Counters only. ncu locks the GPU clock to base speed, so its timings won't
 # match bench_dsd.py. Times come from bench_dsd.py.
 #
-#   bash bench/ncu.sh [version]     (1 or 2)
+#   bash bench/ncu.sh [version]     (1, 2 or 3)
 set -euo pipefail
 VERSION="${1:-1}"
 

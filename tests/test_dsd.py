@@ -9,9 +9,9 @@ from tests.cases import CASE_NAMES, routing_case
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")
 
-# 21 = v2 with a 2-stage pipeline. Only the benchmark uses it, but its
-# shorter ring is the likeliest to have a stage-reuse bug, so test it too.
-VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21)]
+# 21 / 31 = v2 / v3 with a 2-stage pipeline. Only the benchmark uses them,
+# but a shorter ring is the likeliest to have a stage-reuse bug, so test them too.
+VERSIONS = [pytest.param(v, id=f"v{v}") for v in (1, 2, 21, 3, 31)]
 TOL = {"rtol": 1.6e-2, "atol": 1.6e-2}  # bf16 output rounding; layout bugs are far bigger
 
 
