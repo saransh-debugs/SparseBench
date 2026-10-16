@@ -54,3 +54,20 @@ Same setup. Times in ms.
 - Run-to-run noise: the same v5 Mixtral-uniform case measured 5.67 ms in
   bench_dsd.py and 6.44 ms here. Differences under ~10% between scripts are
   not meaningful; compare rows within one table.
+
+## Final fair run (fifth run): stk on its fastest correct index widths
+
+int16 block indices for stk's DSD (MegaBlocks' own choice, checked correct
+every run), int32 only where stk needs it (its SDD). Times in ms.
+
+| method | host sync | Mixtral uniform | Mixtral Zipf | fine-grained uniform | fine-grained Zipf |
+|---|---|---:|---:|---:|---:|
+| **ours (v5)** | no | 6.41 | 5.52 | 0.630 | 0.679 |
+| torch._grouped_mm | no | 4.04 | 4.05 | 1.192 | 1.244 |
+| grouped_gemm (CUTLASS) | yes | 3.95 | 4.05 | 1.180 | 1.211 |
+| stk (MegaBlocks Triton DSD) | yes | 4.89 | 5.03 | 0.649 | 0.696 |
+| per-expert cuBLAS loop | yes | 4.07 | 4.05 | 1.904 | 1.959 |
+| padded bmm | yes | 4.00 | 9.73 | 0.546 | 4.398 |
+
+Fine-grained: ours and stk within 3% of each other (ours slightly ahead), both
+~1.8x faster than grouped GEMM. Mixtral-like: grouped GEMM and stk ahead.

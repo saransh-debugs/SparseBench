@@ -32,14 +32,15 @@ Whole MoE layer, routing included (`bench/bench_moe.py`). Time in ms, lower is b
 
 | | Fine-grained (64 experts) | Mixtral-like (8 experts) |
 |---|---:|---:|
-| **Ours** | **1.49** | 12.1 |
-| Grouped GEMM (`torch._grouped_mm`) | 2.79 | **9.7** |
-| MegaBlocks-style (`stk`) | 2.85 * | 14.6 * |
+| **Ours** | **1.85** | 12.1 |
+| Grouped GEMM (`torch._grouped_mm`) | 3.17 | **9.8** |
+| MegaBlocks-style (`stk`) | 2.60 | 13.0 |
 
-- **Many small experts:** ours is about 1.7–1.9x faster than both.
-- **Few big experts:** grouped GEMM wins. With 8 big matmuls there's no sparsity left to exploit.
+- **Many small experts:** ours is 1.4x faster than MegaBlocks-style and 1.7x faster than grouped GEMM, with no host sync.
+- **Few big experts:** grouped GEMM wins by about 1.2x. With 8 big matmuls there's little sparsity left to exploit. Ours still edges out MegaBlocks-style.
+- Our DSD kernel alone only ties MegaBlocks' (`bench/results_baselines.md`). The end-to-end win comes from the rest of the layer: the fused SDD, GPU-side routing, and no CPU round trip.
 
-\* Being re-measured: the `stk` baseline was briefly run with a slower index width (see TODO).
+Uniform routing shown; Zipf-skewed routing gives the same picture. Full tables and run-to-run noise: `bench/results_moe.md`.
 
 ## Running it
 
@@ -55,7 +56,7 @@ The pure-PyTorch parts (`reference.py`, `topology.py`) and their tests also run 
 
 ## TODO
 
-- [ ] Re-run `bench_baselines.py` and `bench_moe.py` with the `stk` baseline back on its fastest correct index widths, and record the numbers in `bench/results_baselines.md`.
+- [x] Re-run `bench_baselines.py` and `bench_moe.py` with the `stk` baseline on its fastest correct index widths (`bench/results_baselines.md`, `bench/results_moe.md`).
 - [ ] Full sanitizer run over every kernel version (`FULL = True` in the notebook). Day-to-day runs only check the newest two.
 - [ ] H100 port (`sm_90a`): `wgmma` + TMA + `mbarrier` pipeline, on SJSU's HPC. Same tests and benchmarks, results in their own column. First check that `ncu` works there.
 - [ ] Close the Mixtral-like gap to grouped GEMM (~1.25x), or document clearly why block-sparse isn't the right tool for few, large experts.
