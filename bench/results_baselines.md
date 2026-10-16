@@ -71,3 +71,20 @@ every run), int32 only where stk needs it (its SDD). Times in ms.
 
 Fine-grained: ours and stk within 3% of each other (ours slightly ahead), both
 ~1.8x faster than grouped GEMM. Mixtral-like: grouped GEMM and stk ahead.
+
+## Adding ScatterMoE (sixth run)
+
+ScatterMoE (Tan et al. 2024), commit 47b5e15, its `parallel_linear` on
+grouped rows. Passed the correctness check. Times in ms.
+
+| method | Mixtral uniform | Mixtral Zipf | fine-grained uniform | fine-grained Zipf |
+|---|---:|---:|---:|---:|
+| **ours (v5)** | 5.93 | 5.52 | 0.627 | 0.676 |
+| stk (MegaBlocks Triton DSD) | 4.95 | 5.04 | 0.628 | 0.700 |
+| ScatterMoE | 8.43 | 7.10 | 1.554 | 1.445 |
+
+On this one matmul, forward only, on A100: ScatterMoE is 1.3-1.4x slower
+than ours on Mixtral-like shapes and 2.1-2.5x slower on fine-grained. Its
+kernel ships a single tile config (128 x 128 x 32, 4 warps) for every shape.
+ScatterMoE's paper reports wins over MegaBlocks for *training* (forward +
+backward, and memory), which this benchmark doesn't measure.

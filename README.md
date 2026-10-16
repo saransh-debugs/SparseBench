@@ -35,12 +35,13 @@ Whole MoE layer, routing included (`bench/bench_moe.py`). Time in ms, lower is b
 | **Ours** | **1.85** | 12.1 |
 | Grouped GEMM (`torch._grouped_mm`) | 3.17 | **9.8** |
 | MegaBlocks-style (`stk`) | 2.60 | 13.0 |
+| ScatterMoE | 3.40 ‡ | 19.0 ‡ |
 
-- **Many small experts:** ours is 1.4x faster than MegaBlocks-style and 1.7x faster than grouped GEMM, with no host sync.
+- **Many small experts:** ours is 1.4x faster than MegaBlocks-style, 1.7x faster than grouped GEMM and 1.8x faster than ScatterMoE, with no host sync.
 - **Few big experts:** grouped GEMM wins by about 1.2x. With 8 big matmuls there's little sparsity left to exploit. Ours still edges out MegaBlocks-style.
 - Our DSD kernel alone only ties MegaBlocks' (`bench/results_baselines.md`). The end-to-end win comes from the rest of the layer: the fused SDD, GPU-side routing, and no CPU round trip.
 
-Uniform routing shown; Zipf-skewed routing gives the same picture. Full tables and run-to-run noise: `bench/results_moe.md`.
+Uniform routing shown; Zipf-skewed routing gives the same picture. ‡ ScatterMoE was measured in a later session than the other rows (ratios vs ours from that session). This is a forward pass only; ScatterMoE's paper reports its wins for training (forward + backward) and memory. Full tables and run-to-run noise: `bench/results_moe.md`.
 
 ## Running it
 
@@ -57,6 +58,8 @@ The pure-PyTorch parts (`reference.py`, `topology.py`) and their tests also run 
 ## TODO
 
 - [x] Re-run `bench_baselines.py` and `bench_moe.py` with the `stk` baseline on its fastest correct index widths (`bench/results_baselines.md`, `bench/results_moe.md`).
+- [x] Add ScatterMoE as a baseline (`bench/results_baselines.md`, `bench/results_moe.md`).
+- [ ] Token rounding experiment (SonicMoE's idea): round each expert's token count to a multiple of 128 in the router, so there's no padding. Measure speed and how much routing changes.
 - [ ] Full sanitizer run over every kernel version (`FULL = True` in the notebook). Day-to-day runs only check the newest two.
 - [ ] H100 port (`sm_90a`): `wgmma` + TMA + `mbarrier` pipeline, on SJSU's HPC. Same tests and benchmarks, results in their own column. First check that `ncu` works there.
 - [ ] Close the Mixtral-like gap to grouped GEMM (~1.25x), or document clearly why block-sparse isn't the right tool for few, large experts.
