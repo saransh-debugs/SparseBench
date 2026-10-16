@@ -23,3 +23,21 @@ def dsd(
     if blocks.dim() != 3 or blocks.shape[1:] != (bs, bs):
         raise ValueError(f"blocks must be [nnz, {bs}, {bs}] for this topology, got {tuple(blocks.shape)}")
     return _C.dsd_cuda(blocks, w2_cat, topo.row_offsets, topo.col_indices, version)
+
+
+def sdd(x: torch.Tensor, w1: torch.Tensor, topo: Topology | DeviceTopology, gelu: bool = True) -> torch.Tensor:
+    """H = (gelu)(group_tokens(x) @ w1[expert]), kept only on topo's blocks.
+    Same math as reference.sdd_reference (+ gelu), without the dense product.
+
+    x [T, D] bf16, w1 [E, D, F] bf16 -> blocks [nnz, 128, 128] bf16 in topo's
+    BSR order, ready for dsd(). Rows are gathered from x inside the kernel.
+    With a DeviceTopology, nothing syncs; blocks of dead row blocks are left
+    unwritten. Needs block size 128, D % 64 == 0 and F % 256 == 0.
+    """
+    from sparsebench import _C
+
+    if topo.block_size != 128:
+        raise ValueError(f"sdd needs block size 128, got {topo.block_size}")
+    return _C.sdd_cuda(
+        x, w1, topo.row_token, topo.row_block_expert, topo.row_offsets, topo.col_indices.numel(), gelu
+    )

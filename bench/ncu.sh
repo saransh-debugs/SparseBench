@@ -4,12 +4,19 @@
 # Counters only. ncu locks the GPU clock to base speed, so its timings won't
 # match bench_dsd.py. Times come from bench_dsd.py.
 #
-#   bash bench/ncu.sh [version] [shape]     e.g. bash bench/ncu.sh 4 mixtral
-#   version: 1-4, or a hidden variant like 41. shape: fine_grained (default) or mixtral.
+#   bash bench/ncu.sh [version] [shape]     e.g. bash bench/ncu.sh 5 mixtral
+#   version: a DSD version (1-5, or a hidden variant like 41), or "sdd".
+#   shape: fine_grained (default) or mixtral.
 set -euo pipefail
 VERSION="${1:-1}"
 SHAPE="${2:-fine_grained}"
-KERNEL="dsd_v${VERSION:0:1}_kernel"   # 41 runs the v4 kernel
+if [[ "$VERSION" == "sdd" ]]; then
+  KERNEL="sdd_kernel"
+  CMD=(python bench/bench_moe.py --profile --shape "$SHAPE")
+else
+  KERNEL="dsd_v${VERSION:0:1}_kernel"   # 41 runs the v4 kernel
+  CMD=(python bench/bench_dsd.py --profile --version "$VERSION" --shape "$SHAPE")
+fi
 
 # What each metric tells us:
 #   hmma_cycles_active   how busy the Tensor Cores are (the goal: high)
@@ -45,4 +52,4 @@ METRICS=(
 
 ncu --kernel-name "regex:${KERNEL}" --launch-skip 1 --launch-count 1 \
     --metrics "$(IFS=,; echo "${METRICS[*]}")" \
-    python bench/bench_dsd.py --profile --version "$VERSION" --shape "$SHAPE"
+    "${CMD[@]}"

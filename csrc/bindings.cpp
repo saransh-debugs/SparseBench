@@ -10,4 +10,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("num_experts"), py::arg("ffn_dim"), py::arg("block_size"));
   m.def("dsd_cuda", &sparsebench::dsd_cuda, "Block-sparse (BSR) @ dense on Tensor Cores", py::arg("blocks"),
         py::arg("w"), py::arg("row_offsets"), py::arg("col_indices"), py::arg("version"));
+  m.def("sdd_cuda", &sparsebench::sdd_cuda, "Dense @ dense into the block-sparse layout, with fused GELU",
+        py::arg("x"), py::arg("w1"), py::arg("row_token"), py::arg("row_block_expert"), py::arg("row_offsets"),
+        py::arg("num_nnz"), py::arg("apply_gelu"));
 }

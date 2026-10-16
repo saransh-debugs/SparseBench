@@ -52,6 +52,16 @@ __device__ __forceinline__ void cp_async_16(void* smem, const void* gmem) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(smem_addr), "l"(gmem) : "memory");
 }
 
+// Same, but when `valid` is false it reads nothing and writes 16 zero bytes
+// (cp.async's src-size operand = 0). For padding rows: no memory traffic,
+// no branch around the copy. `gmem` must still be a valid address.
+__device__ __forceinline__ void cp_async_16_zfill(void* smem, const void* gmem, bool valid) {
+  const auto smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+  const int src_bytes = valid ? 16 : 0;
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(smem_addr), "l"(gmem), "r"(src_bytes)
+               : "memory");
+}
+
 __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
 
 // The "memory" clobber stops the compiler from moving shared-memory reads

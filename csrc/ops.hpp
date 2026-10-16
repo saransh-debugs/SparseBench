@@ -27,4 +27,12 @@ std::vector<torch::Tensor> build_topology_cuda(const torch::Tensor& expert_idx, 
 torch::Tensor dsd_cuda(const torch::Tensor& blocks, const torch::Tensor& w, const torch::Tensor& row_offsets,
                        const torch::Tensor& col_indices, int64_t version);
 
+// H blocks [num_nnz, 128, 128] = (gelu)(X_grouped @ W1[expert]) on the layout's
+// blocks. x [T, D] and w1 [E, D, F] bf16; rows are gathered from x through
+// row_token (padding rows read as zero). Block size 128, D % 64, F % 256.
+// Blocks of dead row blocks are left unwritten.
+torch::Tensor sdd_cuda(const torch::Tensor& x, const torch::Tensor& w1, const torch::Tensor& row_token,
+                       const torch::Tensor& row_block_expert, const torch::Tensor& row_offsets, int64_t num_nnz,
+                       bool apply_gelu);
+
 }  // namespace sparsebench
