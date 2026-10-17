@@ -59,7 +59,8 @@ The pure-PyTorch parts (`reference.py`, `topology.py`) and their tests also run 
 
 - [x] Re-run `bench_baselines.py` and `bench_moe.py` with the `stk` baseline on its fastest correct index widths (`bench/results_baselines.md`, `bench/results_moe.md`).
 - [x] Add ScatterMoE as a baseline (`bench/results_baselines.md`, `bench/results_moe.md`).
-- [ ] Token rounding experiment (SonicMoE's idea): round each expert's token count to a multiple of 128 in the router, so there's no padding. Measure speed and how much routing changes.
+- [x] Token rounding experiment (SonicMoE's idea): 1.28-1.30x faster layer where padding is 35%, 1.07-1.11x where experts average 4 tiles (the regime the paper says is safe for quality). Helps grouped GEMM too. Our PyTorch rounding step costs as much as it saves (`bench/results_token_rounding.md`).
+- [ ] Fuse token rounding into the routing kernel (it already counts tokens per expert), so the rounding step stops costing 0.6+ ms.
 - [ ] Full sanitizer run over every kernel version (`FULL = True` in the notebook). Day-to-day runs only check the newest two.
 - [ ] H100 port (`sm_90a`): `wgmma` + TMA + `mbarrier` pipeline, on SJSU's HPC. Same tests and benchmarks, results in their own column. First check that `ncu` works there.
 - [ ] Close the Mixtral-like gap to grouped GEMM (~1.25x), or document clearly why block-sparse isn't the right tool for few, large experts.
