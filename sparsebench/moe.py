@@ -7,6 +7,8 @@ for the GPU to learn how many rows routing produced. Same math as
 reference.moe_reference.
 """
 
+import dataclasses
+
 import torch
 
 from sparsebench.routing import route_device
@@ -34,3 +36,38 @@ def moe_forward(
     num_tokens, k = expert_idx.shape
     rows = y[topo.copy_row.long()].view(num_tokens, k, d_model)
     return (rows.float() * expert_weight.float()[..., None]).sum(dim=1).to(x.dtype)
+
+
+def moe_forward_assigned(
+    x: torch.Tensor,
+    token_of_copy: torch.Tensor,
+    expert_of_copy: torch.Tensor,
+    weight_of_copy: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+) -> torch.Tensor:
+    """Same layer for any routing given as a flat list: copy c sends token
+    token_of_copy[c] to expert expert_of_copy[c] with weight weight_of_copy[c].
+    A token may have any number of copies, including none (output row = 0),
+    e.g. after token rounding (sparsebench/token_rounding.py).
+
+    No kernel changes: the copies go through route_device as k = 1, and
+    row_token is remapped from copy index to token. Still no host sync.
+    """
+    num_experts, d_model, ffn_dim = w1.shape
+    num_tokens = x.shape[0]
+    if expert_of_copy.numel() == 0:  # host-known size: nothing routed anywhere
+        return torch.zeros_like(x)
+
+    topo = route_device(expert_of_copy.view(-1, 1), num_experts, ffn_dim, BLOCK_SIZE)
+    row_copy = topo.row_token  # with k = 1 these are copy indices, -1 for padding
+    token32 = token_of_copy.to(torch.int32)
+    row_token = torch.where(row_copy >= 0, token32[row_copy.clamp(min=0).long()], -1).to(torch.int32)
+    topo = dataclasses.replace(topo, row_token=row_token)
+
+    h = sdd(x, w1, topo, gelu=True)
+    y = dsd(h, w2.view(num_experts * ffn_dim, d_model), topo, version=5)
+
+    rows = y[topo.copy_row.long()].float() * weight_of_copy.float()[:, None]
+    out = torch.zeros(num_tokens, d_model, dtype=torch.float32, device=x.device)
+    return out.index_add_(0, token_of_copy.long(), rows).to(x.dtype)

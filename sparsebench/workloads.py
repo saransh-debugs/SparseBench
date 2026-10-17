@@ -34,3 +34,19 @@ def routing_case(name: str, num_tokens: int, num_experts: int, seed: int = 0) ->
 
 
 CASE_NAMES = ["random", "skewed", "two_experts_only", "empty_middle", "zipf"]
+
+
+def router_scores(name: str, num_tokens: int, num_experts: int, seed: int = 0) -> torch.Tensor:
+    """Softmax router scores [T, E], float32, for routers that need full scores
+    (token rounding), not just top-k picks.
+
+    "uniform": random logits. "zipf": random logits plus a per-expert bias of
+    -1.2 * log(rank), so expert popularity falls off like routing_case("zipf").
+    """
+    g = torch.Generator().manual_seed(seed)
+    logits = torch.randn(num_tokens, num_experts, generator=g)
+    if name == "zipf":
+        logits = logits - ZIPF_EXPONENT * torch.log(torch.arange(1, num_experts + 1, dtype=torch.float32))
+    elif name != "uniform":
+        raise ValueError(name)
+    return torch.softmax(logits, dim=-1)
