@@ -70,3 +70,15 @@ def test_moe_layer_cuda_graph_proves_no_host_sync() -> None:
         torch.cuda.synchronize()
         expected = moe_reference(x.float(), idx, weight.float(), w1.float(), w2.float())
         torch.testing.assert_close(out.float(), expected, rtol=3e-2, atol=3e-2)
+
+
+def test_stage_marks_fire_in_order_and_change_nothing() -> None:
+    from sparsebench.moe import moe_forward
+
+    x, w1, w2 = make_layer(300, 8, 256, 512)
+    idx = routing_case("zipf", 300, 8).cuda()
+    weight = torch.rand(300, 2, generator=torch.Generator().manual_seed(1)).bfloat16().cuda()
+    seen: list[str] = []
+    marked = moe_forward(x, idx, weight, w1, w2, mark=seen.append)
+    assert seen == ["routing", "SDD + GELU (fused)", "DSD", "combine"]
+    assert torch.equal(marked, moe_forward(x, idx, weight, w1, w2))

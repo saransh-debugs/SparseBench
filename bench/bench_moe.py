@@ -66,7 +66,11 @@ def combine(y_copies: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return (y_copies.view(num_tokens, k, -1).float() * weight.float()[..., None]).sum(1).to(y_copies.dtype)
 
 
-def grouped_mm_pipeline(x, idx, weight, w1, w2) -> torch.Tensor:
+def _no_mark(stage: str) -> None:
+    pass
+
+
+def grouped_mm_pipeline(x, idx, weight, w1, w2, mark=_no_mark) -> torch.Tensor:
     num_experts, k = w1.shape[0], idx.shape[1]
     flat = idx.reshape(-1)
     order = torch.sort(flat, stable=True).indices
@@ -75,20 +79,30 @@ def grouped_mm_pipeline(x, idx, weight, w1, w2) -> torch.Tensor:
         0, flat, torch.ones_like(flat, dtype=torch.int32)
     )
     offs = torch.cumsum(counts, 0, dtype=torch.int32)
-    h = F.gelu(torch._grouped_mm(x[order // k], w1, offs=offs))
+    xg = x[order // k]
+    mark("sort + gather")
+    h = torch._grouped_mm(xg, w1, offs=offs)
+    mark("GEMM 1")
+    h = F.gelu(h)
+    mark("GELU")
     y = torch._grouped_mm(h, w2, offs=offs)
+    mark("GEMM 2")
     y_copies = torch.empty_like(y)
     y_copies[order] = y
-    return combine(y_copies, weight)
+    out = combine(y_copies, weight)
+    mark("unsort + combine")
+    return out
 
 
-def stk_pipeline(x, idx, weight, w1, w2, w1_cat, w2_cat) -> torch.Tensor:
+def stk_pipeline(x, idx, weight, w1, w2, w1_cat, w2_cat, mark=_no_mark) -> torch.Tensor:
     import stk
 
     num_experts, d_model, ffn_dim = w1.shape
     topo = build_topology_cuda(idx, num_experts, ffn_dim, 128)  # syncs: stk needs sizes on the host
+    mark("routing (+ host sync)")
     row_token = topo.row_token.long()
     xg = x[row_token.clamp(min=0)] * (row_token >= 0)[:, None].to(x.dtype)  # padded, grouped copy of x
+    mark("padded copy of x")
     counts = (topo.row_offsets[1:] - topo.row_offsets[:-1]).long()
     row_indices = torch.repeat_interleave(torch.arange(topo.num_row_blocks, device=x.device), counts)
     cols = topo.col_indices.long()
@@ -111,16 +125,35 @@ def stk_pipeline(x, idx, weight, w1, w2, w1_cat, w2_cat) -> torch.Tensor:
         meta[0].to(i32), meta[1].to(i32), topo.row_offsets.to(torch.int32),
         meta[2].to(i32), offsets_t, gather.to(torch.int32),
     )  # fmt: skip
+    mark("layout metadata")
     h = stk.ops.sdd(xg, w1_cat, layout)
+    mark("SDD")
     h = stk.Matrix(h.size(), F.gelu(h.data), meta[0].to(i_dsd), meta[1].to(i_dsd), h.offsets,
                    meta[2].to(i_dsd), h.offsets_t, h.block_offsets_t)  # fmt: skip
+    mark("GELU")
     y = stk.ops.dsd(h, w2_cat)
-    return combine(y[topo.copy_row.long()], weight)
+    mark("DSD")
+    out = combine(y[topo.copy_row.long()], weight)
+    mark("combine")
+    return out
 
 
-def scattermoe_pipeline(x, idx, weight, mlp) -> torch.Tensor:
+def scattermoe_pipeline(x, idx, weight, mlp, mark=None) -> torch.Tensor:
     with torch.no_grad():  # inference: no autograd bookkeeping
-        return mlp(x, weight, idx)
+        if mark is None:
+            return mlp(x, weight, idx)
+        # Same steps as scattermoe.mlp.MLP.forward, with stage marks.
+        from scattermoe.parallel_experts import flatten_sort_count
+
+        sorted_expert, sorted_scattered, offsets = flatten_sort_count(idx, num_experts=mlp.num_experts)
+        mark("sort (+ host sync: bincount)")
+        h = mlp.experts(x, mlp.top_k, sorted_expert, sorted_scattered, offsets, grouped_out=True)
+        mark("GEMM 1 (gather fused)")
+        h = mlp.activation(h)
+        mark("GELU")
+        out = mlp.output_experts(h, 1, sorted_expert, sorted_scattered, offsets, grouped_in=True, gates=weight)
+        mark("GEMM 2 (scatter + weights fused)")
+        return out
 
 
 def make_scattermoe_mlp(w1: torch.Tensor, w2: torch.Tensor) -> object:

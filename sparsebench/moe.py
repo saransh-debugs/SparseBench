@@ -8,6 +8,7 @@ reference.moe_reference.
 """
 
 import dataclasses
+from collections.abc import Callable
 
 import torch
 
@@ -17,11 +18,23 @@ from sparsebench.spmm import dsd, sdd
 BLOCK_SIZE = 128
 
 
+def _no_mark(stage: str) -> None:
+    pass
+
+
 def moe_forward(
-    x: torch.Tensor, expert_idx: torch.Tensor, expert_weight: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
+    x: torch.Tensor,
+    expert_idx: torch.Tensor,
+    expert_weight: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    mark: Callable[[str], None] = _no_mark,
 ) -> torch.Tensor:
     """x [T, D], expert_idx / expert_weight [T, k], w1 [E, D, F], w2 [E, F, D] -> [T, D].
-    bf16 weights and activations; fp32 accumulation inside the kernels."""
+    bf16 weights and activations; fp32 accumulation inside the kernels.
+
+    mark(stage) is called right after each stage is launched; the per-stage
+    benchmark (bench/bench_breakdown.py) records a CUDA event there."""
     num_experts, d_model, ffn_dim = w1.shape
     if w2.shape != (num_experts, ffn_dim, d_model):
         raise ValueError(f"w2 must be {(num_experts, ffn_dim, d_model)}, got {tuple(w2.shape)}")
@@ -29,13 +42,18 @@ def moe_forward(
         raise ValueError("x must be [T, D] and expert_idx / expert_weight [T, k]")
 
     topo = route_device(expert_idx, num_experts, ffn_dim, BLOCK_SIZE)
+    mark("routing")
     h = sdd(x, w1, topo, gelu=True)
+    mark("SDD + GELU (fused)")
     y = dsd(h, w2.view(num_experts * ffn_dim, d_model), topo, version=5)
+    mark("DSD")
 
     # Each token's k rows, weighted. Indexing with GPU tensors: no sync.
     num_tokens, k = expert_idx.shape
     rows = y[topo.copy_row.long()].view(num_tokens, k, d_model)
-    return (rows.float() * expert_weight.float()[..., None]).sum(dim=1).to(x.dtype)
+    out = (rows.float() * expert_weight.float()[..., None]).sum(dim=1).to(x.dtype)
+    mark("combine")
+    return out
 
 
 def moe_forward_assigned(
