@@ -11,7 +11,7 @@ On A100, for MoE with many small experts, the layer is **1.4x faster than a Mega
 ## Contents
 
 - [The problem](#the-problem)
-- [How the layer works](#how-the-layer-works)
+- [Architecture](#architecture)
 - [Results](#results)
 - [The kernel, one bottleneck at a time](#the-kernel-one-bottleneck-at-a-time)
 - [What didn't win, and why](#what-didnt-win-and-why)
@@ -35,12 +35,31 @@ In an MoE layer, a router sends each token to its top-k experts (here k = 2). Ea
 
 **Block-sparse instead** (MegaBlocks, 2022): sort token copies by expert, pad each expert only up to a multiple of 128 rows, and treat the whole layer as one matrix multiply that skips every block that would be zero. That's one big launch per matmul, with work split into equal 128-row pieces no matter how skewed the routing is.
 
-## How the layer works
+## Architecture
 
+```mermaid
+flowchart LR
+    subgraph Host["Python host: launches kernels, never waits"]
+        M["moe_forward<br/>sparsebench/moe.py"]
+    end
+    subgraph GPU
+        R["routing.cu<br/>counting sort + block layout"]
+        T[("DeviceTopology<br/>padded_offsets[E] = real row count")]
+        S["sdd.cu<br/>X @ W1, gather + GELU fused"]
+        D["dsd_v5.cu<br/>H @ W2, Tensor Cores"]
+        C["combine<br/>weighted sum of k rows"]
+    end
+    IN[("x, expert_idx")] --> R
+    M -- "launch, no sync" --> R
+    R --> T
+    T -. "real size, read on the GPU" .-> S
+    T -.-> D
+    S -- "H, block-sparse" --> D --> C --> OUT[("out [T, D]")]
 ```
-expert_idx [T, k] ──► routing ──► SDD + GELU ──► DSD ──► combine ──► out [T, D]
-                      (GPU)       (1st matmul)   (2nd matmul)
-```
+
+- **The host only launches.** It never reads a size back from the GPU.
+- **`DeviceTopology` is the hand-off.** Routing writes it. Both matmuls read the real row count from it.
+- **The extension is one pybind11 module** (`csrc/bindings.cpp`): routing, SDD, DSD.
 
 | Step | File | What it does |
 |---|---|---|
